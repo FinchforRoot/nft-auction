@@ -2,10 +2,10 @@
 pragma solidity ^0.8.13;
 
 import {Script} from "forge-std/Script.sol";
-import {Counter} from "../src/Counter.sol";
+import {NftAuction} from "../src/NftAuction.sol";
 
-contract CounterScript is Script {
-    Counter public counter;
+contract NftAuctionScript is Script {
+    NftAuction public nftAuction;
 
     function setUp() public {}
 

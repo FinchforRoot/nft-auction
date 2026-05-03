@@ -3,10 +3,12 @@ pragma solidity ^0.8.24;
 
 import {IERC721} from "openzeppelin-contracts/contracts/token/ERC721/IERC721.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {UUPSUpgradeable} from "openzeppelin-contracts-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
 
-contract NftAuction{
-    // 结构
+contract NftAuction is Initializable,UUPSUpgradeable{
+    // 拍卖结构
     struct Auction {
         // 卖家
         address seller;
@@ -29,16 +31,20 @@ contract NftAuction{
         // 最高出价者
         address highestBidder;
         // 出价代币数量
-        unit256 highestBidAmount;
+        uint256 highestBidAmount;
     }
 
+    // 状态
     enum Status {
         Pending, //未开始
         OnGoing, //进行中
         Ended, //已结束
+        NoBid, //流拍
         Cancelled //已取消
     }
 
+    // NFT拍卖合集 第一层 key：NFT 合约地址 第二层 key：NFT 的 tokenId 值：拍卖ID（uint256）
+    mapping(address => mapping(uint256 => uint256)) public nftToken2AuctionId;
     // 拍卖集合
     mapping(uint256 => Auction) public auctions;
     // 下一个拍卖的id
@@ -87,16 +93,24 @@ contract NftAuction{
         uint256 _delayHours,    //拍卖开始前的延迟时间，单位小时 [0-720]
         uint256 _durationHours  //拍卖持续时间，单位小时[0-24]
     ) public {
+        // 先检查nft合约地址合法
         require(_nftContract != address(0), "nft address invalid");
+        // 起拍价必须大于0
         require(_startPrice > 0, "start price invalid");
+        // 业务设置允许推迟拍卖，为0表示立即开始，上限是24小时后开启拍卖
         require(
-            _delayHours > 0 && _delayHours < 720 hours,
+            _delayHours >= 0 && _delayHours < 24,
             "_delayHours invalid"
         );
+        // 拍卖持续时间为1-24小时
         require(
-            _durationHours > 0 && _durationHours < 24 hours,
+            _durationHours >= 1 && _durationHours <= 24,
             "_durationHours invalid"
         );
+        // 校验这个nft是否已经上架
+        uint256 existingId = nftToken2AuctionId[nftContract][tokenId];
+        // 已上架过的NFT不能再次拍卖
+        require(existingId !=0,"NFT already in auction");
         // 校验nft是调用者的
         require(
             IERC721(_nftContract).ownerOf(_tokenId) == msg.sender,
@@ -125,6 +139,9 @@ contract NftAuction{
             highestBidder: address(0),
             highestBidAmount: 0
         });
+
+        // 记录某个NFT是否处于拍卖中
+        nftToken2AuctionId[_nftContract][_tokenId] = auctionId;
 
         emit AuctionCreated(
             auctionId,
@@ -166,56 +183,6 @@ contract NftAuction{
         require(auction.seller != address(0), "auction not exist");
         require(auction.currentStatus == Status.OnGoing, "auction not on going");
         require(auction.seller != msg.sender, "seller can not bid");
-        
-        bool isErc20 = false;
-        // 校验ETH
-        if(_tokenAddress == address(0)){
-            require(msg.value > 0 , "bid amount not match with value");
-        }else{
-            // 校验ERC20
-            require(msg.value == 0, "value must be 0 when bid with token");
-            require(_tokenAddress.code.length>0,"not a contract");
-            try IERC20(_tokenAddress).decimals() returns (uint8){
-                isErc20 = true;
-            }catch {
-                revert("not a valid ERC20 token");
-            }
-            require(_bidAmount > 0,"_bidAmount is invaild");
-        }
-        // 如果拍卖行没有人出价
-        if(auction.highestBidder == address(0)){
-            if(isErc20){
-                // 获取出价的美元价值
-                uint256 bidUsdValue = priceOracle.getPrice(_tokenAddress, _bidAmount);
-                require(bidUsdValue >= auction.startPrice * 105 / 100, "bid amount too low");
-                IERC20(_tokenAddress).transferFrom(_tokenAddress, address(this), _bidAmount);
-                auction.bidToken = _tokenAddress;
-                auction.highestBid = 
-            }else{
-
-            }
-        }else{
-
-        }
-        // 获取出价的美元价值
-            uint256 bidUsdValue = priceOracle.getPrice(msg.sender, _bidAmount);
-            require(bidUsdValue >= auction.startPrice * 105 / 100, "bid amount too low");
-            // 如果有之前的最高出价，退回之前最高出价者的金额【可能是ETH，也可能是ERC20代币】
-            if (auction.highestBidder != address(0)) {
-                if(auction.bidToken == address(0)){
-                    // 之前也是用ETH出价的，直接退回ETH
-                    (bool success, ) = auction.highestBidder.call{value: auction.highestBid}("");
-                    require(success, "Refund failed");
-                }else{
-                    // 之前用的ERC20代币出价的，退回ERC20代币
-                    IERC20(auction.bidToken).transfer(auction.highestBidder, auction.highestBid);
-                }
-            }
-            // 转移竞拍代币到合约
-            IERC20(_tokenAddress).transferFrom(msg.sender, address(this), _bidAmount);
-            // 更新最高出价和最高出价者
-            auction.highestBid = bidUsdValue;
-            auction.highestBidder = msg.sender;
     }
 
     // 结束拍卖
@@ -223,8 +190,27 @@ contract NftAuction{
         
     }
 
-    // 取消拍卖
+    /**
+     * @dev 取消拍卖
+     * @param _auctionId 拍卖id
+     * @notice 只有卖家可以在拍卖未开始前操作
+     */
     function cancelAuction(uint256 _auctionId) external {
-        
+        // 验证拍卖ID有效
+        require(_auctionId >0 && _auctionId < nextAuctionId,"Invalid auction ID");
+        Auction storage auction = auctions[_auctionId];
+        // 验证拍卖存在（通过检查seller不为零地址）
+        require(auction.seller != address(0), "Auction not exist");
+        // 只有卖家可以取消
+        require(msg.sender == auction.seller, "Only seller");
+        // 状态必须是Pending
+        require(auction.currentStatus == Status.Pending, "Must be Pending");
+        // 必须在开始时间之前
+        require(block.timestamp < auction.startTime, "Already started");
+        // 更新状态
+        auction.currentStatus = Status.Cancelled;
+        // 退回NFT
+        IERC721(auction.nftContract).transferFrom(address(this), auction.seller, auction.tokenId);
+        emit AuctionCancelled(_auctionId);
     }
 }
