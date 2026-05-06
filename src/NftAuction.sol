@@ -6,6 +6,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {UUPSUpgradeable} from "openzeppelin-contracts-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {Initializable} from "openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol";
 import {IPriceOracle} from "./interfaces/IPriceOracle.sol";
+import {AggregatorV3Interface} from "chainlink-brownie-contracts/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 contract NftAuction is Initializable,UUPSUpgradeable{
     // 拍卖结构
@@ -14,8 +15,6 @@ contract NftAuction is Initializable,UUPSUpgradeable{
         address seller;
         // NFT合约地址
         address nftContract;
-        // address(0) 表示 ETH，其他地址表示 ERC20 代币合约
-        address bidToken;
         // NFT的tokenId
         uint256 tokenId;
         // 起拍价,单位美元
@@ -32,6 +31,8 @@ contract NftAuction is Initializable,UUPSUpgradeable{
         address highestBidder;
         // 出价代币数量
         uint256 highestBidAmount;
+        // address(0) 表示 ETH,其他地址表示 ERC20 代币合约
+        address tokenAddress;
     }
 
     // 状态
@@ -49,8 +50,8 @@ contract NftAuction is Initializable,UUPSUpgradeable{
     mapping(uint256 => Auction) public auctions;
     // 下一个拍卖的id
     uint256 public nextAuctionId;
-    // 价格预言机地址
-    IPriceOracle public priceOracle;
+    // 代币地址和价格数据源映射
+    mapping(address => AggregatorV3Interface) public priceFeeds;
     // 管理员
     address public admin;
 
@@ -79,10 +80,30 @@ contract NftAuction is Initializable,UUPSUpgradeable{
         uint256 bidAmount
     );
 
-    constructor(address _priceOracle) {
+    function initialize() public initializer {
         admin = msg.sender;
-        // Initialize the price oracle
-        priceOracle = IPriceOracle(_priceOracle);
+    }
+
+    /**
+     * 
+     * @dev 查询指定代币的最新链上价格
+     * @param _tokenAddress 要查询价格的代币合约地址（例如 USDT 的合约地址，或 ETH 用 address(0) 表示）
+     * @notice 根据传入的代币地址，从对应的 Chainlink 喂价合约中获取最新的链上价格
+     * @return answer 该代币对美元的当前价格，精度为 8 位小数（例如 231812345678 表示 2318.12345678 美元）
+     */
+    function getChainlinkDataFeedLatestAnswer(
+        address _tokenAddress
+    ) public view returns (int){
+        AggregatorV3Interface priceFeed = priceFeeds[_tokenAddress];
+        // prettier-ignore
+        (
+            /* uint80 roundId */,
+            int256 answer,
+            /*uint256 startedAt*/,
+            /*uint256 updatedAt*/,
+            /*uint80 answeredInRound*/
+        ) = priceFeed.latestRoundData();
+        return answer;
     }
 
     // 创建拍卖
@@ -182,12 +203,47 @@ contract NftAuction is Initializable,UUPSUpgradeable{
         Auction storage auction = auctions[_auctionId];
         require(auction.seller != address(0), "auction not exist");
         require(auction.currentStatus == Status.OnGoing, "auction not on going");
+        require(auction.startTime < block.timestamp,"auction not start");
         require(auction.seller != msg.sender, "seller can not bid");
+        // 计算最小的出价
+        uint256 minPrice;
+        if(auction.highestBid==0){
+            minPrice = auction.startPrice;
+        }else{
+            minPrice = auction.highestBid * 105 / 100;
+        }
+        // 计算出价，转换为美元
+        uint256 payValue;
+        if(_tokenAddress !=address(0)){
+            // 是ERC20代币
+            payValue = _bidAmount * uint(getChainlinkDataFeedLatestAnswer(_tokenAddress));
+        }else{
+            _bidAmount = msg.value;
+            payValue = _bidAmount * uint(getChainlinkDataFeedLatestAnswer(address(0)));
+        }
+        // 出价必须大于计算的最小出价
+        require(payValue>=minPrice,"Bid too low");
+
+        // 如果有之前的出价者，直接退款给他们
+        if (auction.highestBidder != address(0)){
+
+        }
+
     }
 
     // 结束拍卖
     function endAuction(uint256 _auctionId) external {
+        Auction storage auction = auctions[_auctionId];
+        require(auction.seller != address(0), "auction not exist");
+        require(block.timestamp >= auction.endTime, "Auction not ended");
         
+        if(auction.highestBidder == address(0)){
+            auction.currentStatus = Status.NoBid;
+        } else{
+            auction.currentStatus = Status.Ended;
+        }
+
+        emit AuctionEnded(_auctionId, auction.highestBidder, auction.highestBid);
     }
 
     /**

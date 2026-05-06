@@ -64,3 +64,15 @@ $ forge --help
 $ anvil --help
 $ cast --help
 ```
+
+```shell
+forge install OpenZeppelin/openzeppelin-contracts-upgradeable
+forge install smartcontractkit/chainlink-brownie-contracts
+forge install OpenZeppelin/openzeppelin-contracts
+forge install foundry-rs/forge-std
+```
+在vscode需要安装的插件
+```text
+Solidity
+Nomic Foundation
+```
