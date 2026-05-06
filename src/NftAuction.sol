@@ -227,6 +227,8 @@ contract NftAuction is Initializable,UUPSUpgradeable{
         // 如果有之前的出价者，直接退款给他们
         if (auction.highestBidder != address(0)){
 
+        }else{
+            
         }
 
     }
@@ -234,15 +236,20 @@ contract NftAuction is Initializable,UUPSUpgradeable{
     // 结束拍卖
     function endAuction(uint256 _auctionId) external {
         Auction storage auction = auctions[_auctionId];
+        // 先验证拍卖存在
         require(auction.seller != address(0), "auction not exist");
+        // 验证是否到了结束时间
         require(block.timestamp >= auction.endTime, "Auction not ended");
         
+        // 如果出价者为0，更新状态为流拍
         if(auction.highestBidder == address(0)){
             auction.currentStatus = Status.NoBid;
         } else{
+            // 否则更新为结束
             auction.currentStatus = Status.Ended;
         }
 
+        // 发送拍卖结束事件
         emit AuctionEnded(_auctionId, auction.highestBidder, auction.highestBid);
     }
 
